@@ -6,7 +6,7 @@
 <title>Checkpoint — QR Check-In</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
-<script src="https://cdnjs.cloudflare.com/ajax/libs/jsqr/1.4.0/jsQR.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/qr-scanner/1.4.2/qr-scanner.umd.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
 <style>
   :root{
@@ -117,10 +117,23 @@
   }
   .scan-status strong{color:var(--ink); font-weight:600;}
   .cam-error{
-    margin:20px; padding:16px; border-radius:12px;
+    margin:20px 20px 0; padding:16px; border-radius:12px;
     background:#FBEAEA; color:var(--red); font-size:13px;
     border:1px solid rgba(217,82,75,0.25);
   }
+  .manual-entry{
+    margin:14px 20px 0; padding:14px; border-radius:12px;
+    background:#fff; border:1px solid var(--line);
+  }
+  .manual-entry label{
+    font-size:11px; color:var(--slate); text-transform:uppercase; letter-spacing:0.03em;
+    font-weight:600; display:block; margin-bottom:8px;
+  }
+  .manual-entry input{
+    flex:1; border:1.5px solid var(--line); border-radius:8px; padding:10px 12px;
+    font-family:'IBM Plex Mono',monospace; font-size:14px;
+  }
+  .manual-entry .btn{padding:10px 16px; font-size:13px;}
   .btn{
     font-family:'Inter',sans-serif;
     font-weight:600;
@@ -310,6 +323,9 @@
       <span id="hdrCount">0 checked in today</span>
     </div>
   </header>
+  <div id="storageWarn" style="display:none; background:#FBEAEA; color:var(--red); font-size:12px; padding:10px 20px; border-bottom:1px solid rgba(217,82,75,0.25);">
+    ⚠ Check-ins aren't syncing to shared storage right now. Try opening this page in its own browser tab (not the embedded preview) and reload.
+  </div>
 
   <main>
     <!-- SCAN VIEW -->
@@ -462,56 +478,77 @@
   var ticketDetail = document.getElementById('ticketDetail');
   var ticketTop = document.getElementById('ticketTop');
 
-  var canvas = document.createElement('canvas');
-  var ctx = canvas.getContext('2d', { willReadFrequently: true });
-  var streamRef = null;
-  var rafId = null;
-  var scanning = false;
+  var qrScanner = null;
   var busy = false; // true while processing a code / dialog open
 
+  if(window.QrScanner){
+    QrScanner.WORKER_PATH = 'https://cdnjs.cloudflare.com/ajax/libs/qr-scanner/1.4.2/qr-scanner-worker.min.js';
+  }
+
   function ensureCamera(){
-    if(streamRef){ scanning = true; loop(); return; }
-    if(!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia){
-      showCamError('Camera access is not available in this browser.');
+    if(!window.QrScanner){
+      showCamError('The QR scanner library failed to load. Check your internet connection and reload.');
       return;
     }
-    navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: 'environment' } } })
-      .then(function(stream){
-        streamRef = stream;
-        video.srcObject = stream;
-        camErrorBox.innerHTML = '';
-        scanning = true;
-        video.play();
-        loop();
-      })
+    if(qrScanner){
+      qrScanner.start().catch(function(){});
+      return;
+    }
+    qrScanner = new QrScanner(
+      video,
+      function(result){
+        if(busy) return;
+        var text = (typeof result === 'string') ? result : (result && result.data);
+        if(text){ busy = true; handleScan(text.trim()); }
+      },
+      {
+        onDecodeError: function(){ /* expected constantly while no code is in frame */ },
+        highlightScanRegion: false,
+        highlightCodeOutline: false,
+        preferredCamera: 'environment',
+        maxScansPerSecond: 6
+      }
+    );
+    qrScanner.start()
+      .then(function(){ camErrorBox.innerHTML = ''; })
       .catch(function(err){
-        showCamError('Could not access the camera. Check camera permission for this page and reload.');
+        var reason = (err && err.name) ? err.name : (typeof err === 'string' ? err : 'Unknown');
+        var msg = 'Could not access the camera (' + reason + ').';
+        if(reason === 'NotAllowedError' || reason === 'PermissionDeniedError'){
+          msg += ' Camera permission was denied — allow it in your browser\'s site settings, or open this page in its own browser tab instead of an embedded preview.';
+        } else if(reason === 'NotFoundError' || reason === 'DevicesNotFoundError'){
+          msg += ' No camera was found on this device.';
+        } else if(reason === 'NotReadableError' || reason === 'TrackStartError'){
+          msg += ' The camera is already in use by another app.';
+        } else if(reason === 'SecurityError'){
+          msg += ' This page needs to be opened directly (not inside an embedded frame) for camera access to work.';
+        } else {
+          msg += ' If this is opened inside an embedded preview, try opening it in its own browser tab.';
+        }
+        showCamError(msg);
       });
   }
   function pauseCamera(){
-    scanning = false;
-    if(rafId) cancelAnimationFrame(rafId);
+    if(qrScanner) qrScanner.stop();
   }
   function showCamError(msg){
-    camErrorBox.innerHTML = '<div class="cam-error">'+msg+'</div>';
-  }
-
-  function loop(){
-    if(!scanning) return;
-    if(!busy && video.readyState === video.HAVE_ENOUGH_DATA){
-      var w = 320;
-      var h = Math.floor(video.videoHeight / video.videoWidth * w) || 320;
-      canvas.width = w; canvas.height = h;
-      ctx.drawImage(video, 0, 0, w, h);
-      var imgData = ctx.getImageData(0,0,w,h);
-      var code = null;
-      try{ code = jsQR(imgData.data, w, h); }catch(e){}
-      if(code && code.data){
-        busy = true;
-        handleScan(code.data.trim());
-      }
-    }
-    rafId = requestAnimationFrame(loop);
+    camErrorBox.innerHTML =
+      '<div class="cam-error">'+msg+
+      '<button class="btn ghost" id="retryCamBtn" style="margin-top:10px; width:100%;">Try again</button>'+
+      '</div>'+
+      '<div class="manual-entry">'+
+        '<label>Or enter a code manually</label>'+
+        '<div style="display:flex; gap:8px;">'+
+          '<input type="text" id="manualCodeInput" placeholder="QR-0001">'+
+          '<button class="btn" id="manualCodeBtn">Check in</button>'+
+        '</div>'+
+      '</div>';
+    document.getElementById('retryCamBtn').addEventListener('click', ensureCamera);
+    document.getElementById('manualCodeBtn').addEventListener('click', function(){
+      var input = document.getElementById('manualCodeInput');
+      var val = input.value.trim();
+      if(val){ busy = false; handleScan(val); input.value=''; }
+    });
   }
 
   async function handleScan(text){
@@ -672,9 +709,25 @@
   });
   document.getElementById('printBtn').addEventListener('click', function(){ window.print(); });
 
+  // ---------- Storage health check ----------
+  async function checkStorageHealth(){
+    var testKey = 'healthcheck:' + Date.now();
+    var warnEl = document.getElementById('storageWarn');
+    try{
+      if(!window.storage) throw new Error('no storage');
+      await window.storage.set(testKey, 'ok', true);
+      var readBack = await window.storage.get(testKey, true);
+      if(!readBack || readBack.value !== 'ok') throw new Error('mismatch');
+      warnEl.style.display = 'none';
+    }catch(e){
+      warnEl.style.display = 'block';
+    }
+  }
+
   // ---------- Init ----------
   ensureCamera();
   loadAdmin();
+  checkStorageHealth();
   setInterval(function(){
     document.getElementById('hdrDate').textContent = fmtDateLabel(todayStr());
   }, 60000);
