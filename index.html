@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>QR Scanner Check-In</title>
+  <script src="https://unpkg.com/html5-qrcode"></script>
+  <style>
+    body { font-family: sans-serif; text-align: center; margin: 0; padding: 20px; }
+    #reader { width: 100%; max-width: 500px; margin: auto; }
+    #status { margin-top: 15px; font-weight: bold; }
+  </style>
+</head>
+<body>
+
+  <h2>Mobile QR Check-In</h2>
+  <div id="reader"></div>
+  <div id="status">Scanning...</div>
+
+  <script>
+    const SCRIPT_URL = "YOUR_GOOGLE_APPS_SCRIPT_WEB_APP_URL";
+    let isProcessing = false;
+
+    function onScanSuccess(decodedText) {
+      if (isProcessing) return;
+      isProcessing = true;
+
+      document.getElementById('status').innerText = "Processing scan...";
+
+      let formData = new FormData();
+      formData.append("qrData", decodedText);
+
+      fetch(SCRIPT_URL, {
+        method: "POST",
+        body: formData
+      })
+      .then(res => res.json())
+      .then(response => {
+        if (response.status === "duplicate") {
+          alert("⚠️ Warning: This QR code is already checked in!");
+        } else if (response.status === "success") {
+          alert("✅ Success: QR code registered successfully!");
+        } else {
+          alert("❌ Error: " + response.message);
+        }
+      })
+      .catch(err => alert("Connection Error: " + err))
+      .finally(() => {
+        // Cooldown to avoid continuous immediate scans
+        setTimeout(() => { 
+          isProcessing = false; 
+          document.getElementById('status').innerText = "Ready for next scan";
+        }, 2000);
+      });
+    }
+
+    const html5QrcodeScanner = new Html5QrcodeScanner(
+      "reader", { fps: 10, qrbox: { width: 250, height: 250 } }
+    );
+    html5QrcodeScanner.render(onScanSuccess);
+  </script>
+</body>
+</html>
