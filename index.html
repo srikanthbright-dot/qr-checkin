@@ -433,21 +433,78 @@
   function fmtTime(iso){
     return new Date(iso).toLocaleTimeString(undefined,{hour:'2-digit',minute:'2-digit',second:'2-digit'});
   }
-  async function storeGet(key, shared){
-    try{
-      var res = await window.storage.get(key, shared);
-      return res ? res.value : null;
-    }catch(e){ return null; }
+  // ---------- Storage backend (auto-detect: shared bridge, else local device) ----------
+  var backend = null;
+  var backendReady = null;
+
+  var localBackend = {
+    mode: 'local',
+    async get(key){
+      var v = localStorage.getItem(key);
+      return v != null ? { key: key, value: v } : null;
+    },
+    async set(key, value){
+      localStorage.setItem(key, value);
+      return { key: key, value: value };
+    },
+    async list(prefix){
+      var keys = [];
+      for(var i=0;i<localStorage.length;i++){
+        var k = localStorage.key(i);
+        if(k && k.indexOf(prefix) === 0) keys.push(k);
+      }
+      return { keys: keys };
+    }
+  };
+
+  var sharedBackend = {
+    mode: 'shared',
+    async get(key){
+      try{ return await window.storage.get(key, true); }catch(e){ return null; }
+    },
+    async set(key, value){
+      try{ return await window.storage.set(key, value, true); }catch(e){ return null; }
+    },
+    async list(prefix){
+      try{ var r = await window.storage.list(prefix, true); return r || { keys: [] }; }catch(e){ return { keys: [] }; }
+    }
+  };
+
+  function initBackend(){
+    if(backendReady) return backendReady;
+    backendReady = (async function(){
+      var warnEl = document.getElementById('storageWarn');
+      try{
+        if(!window.storage) throw new Error('no storage bridge');
+        var testKey = '__healthcheck__' + Date.now();
+        await window.storage.set(testKey, 'ok', true);
+        var rb = await window.storage.get(testKey, true);
+        if(!rb || rb.value !== 'ok') throw new Error('healthcheck mismatch');
+        backend = sharedBackend;
+        warnEl.style.display = 'none';
+      }catch(e){
+        backend = localBackend;
+        warnEl.style.display = 'block';
+        warnEl.textContent = '⚠ Shared sync isn\'t available in this view, so check-ins are being saved on this device only. That\'s fine for one scanning phone — if you need several phones scanning into one shared list, that needs a real backend server.';
+      }
+      return backend;
+    })();
+    return backendReady;
   }
-  async function storeSet(key, value, shared){
-    try{ return await window.storage.set(key, value, shared); }
-    catch(e){ console.error('storage set failed', e); return null; }
+
+  async function storeGet(key){
+    var b = backend || await initBackend();
+    var res = await b.get(key);
+    return res ? res.value : null;
   }
-  async function storeList(prefix, shared){
-    try{
-      var res = await window.storage.list(prefix, shared);
-      return res && res.keys ? res.keys : [];
-    }catch(e){ return []; }
+  async function storeSet(key, value){
+    var b = backend || await initBackend();
+    return await b.set(key, value);
+  }
+  async function storeList(prefix){
+    var b = backend || await initBackend();
+    var res = await b.list(prefix);
+    return res && res.keys ? res.keys : [];
   }
 
   document.getElementById('hdrDate').textContent = fmtDateLabel(todayStr());
@@ -556,14 +613,14 @@
     if(navigator.vibrate) navigator.vibrate(60);
     var date = todayStr();
     var key = 'checkin:'+date+':'+text;
-    var existing = await storeGet(key, true);
+    var existing = await storeGet(key);
     if(existing){
       var rec = JSON.parse(existing);
       showTicket('duplicate', text, rec.timestamp);
     } else {
       var now = new Date().toISOString();
       var record = { qrId: text, timestamp: now, name: null, designation: null };
-      await storeSet(key, JSON.stringify(record), true);
+      await storeSet(key, JSON.stringify(record));
       showTicket('success', text, now);
     }
   }
@@ -612,10 +669,10 @@
   async function loadAdmin(){
     var date = adminDateInput.value || todayStr();
     var prefix = 'checkin:'+date+':';
-    var keys = await storeList(prefix, true);
+    var keys = await storeList(prefix);
     var entries = [];
     await Promise.all(keys.map(async function(k){
-      var val = await storeGet(k, true);
+      var val = await storeGet(k);
       if(val){
         try{ entries.push(JSON.parse(val)); }catch(e){}
       }
@@ -660,7 +717,7 @@
         var desig = div.querySelector('.desigInput').value.trim();
         var updated = Object.assign({}, rec, { name: name || null, designation: desig || null });
         var key = 'checkin:'+date+':'+rec.qrId;
-        await storeSet(key, JSON.stringify(updated), true);
+        await storeSet(key, JSON.stringify(updated));
         loadAdmin();
       });
       wrap.appendChild(div);
@@ -709,25 +766,11 @@
   });
   document.getElementById('printBtn').addEventListener('click', function(){ window.print(); });
 
-  // ---------- Storage health check ----------
-  async function checkStorageHealth(){
-    var testKey = 'healthcheck:' + Date.now();
-    var warnEl = document.getElementById('storageWarn');
-    try{
-      if(!window.storage) throw new Error('no storage');
-      await window.storage.set(testKey, 'ok', true);
-      var readBack = await window.storage.get(testKey, true);
-      if(!readBack || readBack.value !== 'ok') throw new Error('mismatch');
-      warnEl.style.display = 'none';
-    }catch(e){
-      warnEl.style.display = 'block';
-    }
-  }
-
   // ---------- Init ----------
-  ensureCamera();
-  loadAdmin();
-  checkStorageHealth();
+  initBackend().then(function(){
+    ensureCamera();
+    loadAdmin();
+  });
   setInterval(function(){
     document.getElementById('hdrDate').textContent = fmtDateLabel(todayStr());
   }, 60000);
